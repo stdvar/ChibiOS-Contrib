@@ -173,6 +173,99 @@ static void sn32_usb_write_fifo(usbep_t ep, const uint8_t *buf, size_t sz, bool 
 
 void rgb_matrix_disable_noeeprom(void);
 
+static void handle_ack(USBDriver *usbp, usbep_t ep, uint8_t out, uint8_t cnt) {
+    // Get the endpoint config and state
+    size_t n;
+    const USBEndpointConfig *epcp = usbp->epc[ep];
+    USBInEndpointState *isp = epcp->in_state;
+    USBOutEndpointState *osp = epcp->out_state;
+    // Process based on endpoint direction
+    if(out)
+    {
+        // Read size of received data
+        n = cnt;
+        if (n > epcp->out_maxsize)
+            n = epcp->out_maxsize;
+        //state is NAK already
+        //Just being paranoid here. keep here while debugging EP handling issue
+        //TODO: clean it up when packets are properly handled
+        if (epcp->out_state->rxsize >= n) {
+            //we are ok to copy n bytes to buf
+            sn32_usb_read_fifo(ep, osp->rxbuf, n, true);
+            epcp->out_state->rxsize -= n;
+        }
+        else if (epcp->out_state->rxsize > 0) {
+            //we dont have enough buffer to receive n bytes
+            //copy only size availabe on buffer
+            n = epcp->out_state->rxsize;
+            sn32_usb_read_fifo(ep, osp->rxbuf, n, true);
+            epcp->out_state->rxsize -= n;
+        }
+        else {
+            //well buffer is 0 size. strange. do nothing.
+            n = 0;
+        }
+        osp->rxbuf += n;
+        epcp->out_state->rxcnt += n;
+        if (epcp->out_state->rxpkts > 0) {
+            epcp->out_state->rxpkts -= 1;
+        }
+        if (n < epcp->out_maxsize || epcp->out_state->rxpkts == 0)
+        {
+            _usb_isr_invoke_out_cb(usbp, ep);
+        }
+        else
+        {
+            //not done. keep on receiving
+            USB_EPnAck(ep, 0);
+        }
+    }
+    else
+    {
+        // Process transmit queue
+        isp->txcnt += isp->txlast;
+        n = isp->txsize - isp->txcnt;
+        if (n > 0)
+        {
+            /* Transfer not completed, there are more packets to send.*/
+            if (n > epcp->in_maxsize)
+            {
+                n = epcp->in_maxsize;
+            }
+            /* Writes the packet from the defined buffer.*/
+            isp->txbuf += isp->txlast;
+            isp->txlast = n;
+            sn32_usb_write_fifo(ep, isp->txbuf, n, true);
+            USB_EPnAck(ep, n);
+        }
+        else
+        {
+            //USB_EPnNak(ep); //not needed here it is autoreset to NAK already
+            _usb_isr_invoke_in_cb(usbp, ep);
+        }
+    }
+}
+
+static void handle_nak(USBDriver *usbp, usbep_t ep, uint8_t out) {
+    if(out)
+    {
+        // By acking next OUT token from host we allowing reception
+        // of the data from host
+        USB_EPnAck(ep, 0);
+    }
+    else
+    {
+        // This is not a retransmission
+        // NAK happens when host polls and device has nothing to send
+        // technically speaking callback below is really redundant
+        // but for some reason because of that keyboard works
+        //const USBEndpointConfig *epcp = usbp->epc[ep];
+        //USBInEndpointState *isp = epcp->in_state;
+        //USB_EPnAck(ep, isp->txlast);
+        _usb_isr_invoke_in_cb(usbp, ep);
+    }
+}
+
 /**
  * @brief   USB shared ISR.
  *
@@ -223,7 +316,7 @@ static void usb_lld_serve_interrupt(USBDriver *usbp)
         }
     }
     /////////////////////////////////////////////////
-    /* Device Status Interrupt (SETUP, IN, OUT)      */
+    /* Device Status Interrupt (SETUP, IN, OUT)    */
     /////////////////////////////////////////////////
     else if (iwIntFlag & (mskEP0_SETUP|mskEP0_IN|mskEP0_OUT|mskEP0_IN_STALL|mskEP0_OUT_STALL))
     {
@@ -354,107 +447,31 @@ static void usb_lld_serve_interrupt(USBDriver *usbp)
             ep = USB_EP1;
             out = ( SN_USB->CFG & mskEP1_DIR ) == mskEP1_DIR;
             cnt = SN_USB->EP1CTL & mskEPn_CNT;
+            handle_ack(usbp, ep, out, cnt);
         }
-        else if(iwIntFlag & mskEP2_ACK)
+        if(iwIntFlag & mskEP2_ACK)
         {
             __USB_CLRINSTS(mskEP2_ACK);
             ep = USB_EP2;
             out = ( SN_USB->CFG & mskEP2_DIR ) == mskEP2_DIR;
             cnt = SN_USB->EP2CTL & mskEPn_CNT;
+            handle_ack(usbp, ep, out, cnt);
         }
-        else if(iwIntFlag & mskEP3_ACK)
+        if(iwIntFlag & mskEP3_ACK)
         {
             __USB_CLRINSTS(mskEP3_ACK);
             ep = USB_EP3;
             out = ( SN_USB->CFG & mskEP3_DIR ) == mskEP3_DIR;
             cnt = SN_USB->EP3CTL & mskEPn_CNT;
+            handle_ack(usbp, ep, out, cnt);
         }
-        else if(iwIntFlag & mskEP4_ACK)
+        if(iwIntFlag & mskEP4_ACK)
         {
             __USB_CLRINSTS(mskEP4_ACK);
             ep = USB_EP4;
             out = ( SN_USB->CFG & mskEP4_DIR ) == mskEP4_DIR;
             cnt = SN_USB->EP4CTL & mskEPn_CNT;
-        }
-
-        // Get the endpoint config and state
-        const USBEndpointConfig *epcp = usbp->epc[ep];
-        USBInEndpointState *isp = epcp->in_state;
-        USBOutEndpointState *osp = epcp->out_state;
-
-        // Process based on endpoint direction
-        if(out)
-        {
-            // Read size of received data
-            n = cnt;
-
-            if (n > epcp->out_maxsize)
-                n = epcp->out_maxsize;
-
-            //state is NAK already
-            //Just being paranoid here. keep here while debugging EP handling issue
-            //TODO: clean it up when packets are properly handled
-            if (epcp->out_state->rxsize >= n) {
-                //we are ok to copy n bytes to buf
-                sn32_usb_read_fifo(ep, osp->rxbuf, n, true);
-                epcp->out_state->rxsize -= n;
-            }
-            else if (epcp->out_state->rxsize > 0) {
-                //we dont have enough buffer to receive n bytes
-                //copy only size availabe on buffer
-                n = epcp->out_state->rxsize;
-                sn32_usb_read_fifo(ep, osp->rxbuf, n, true);
-                epcp->out_state->rxsize -= n;
-            }
-            else {
-                //well buffer is 0 size. strange. do nothing.
-                n = 0;
-            }
-            osp->rxbuf += n;
-
-            epcp->out_state->rxcnt += n;
-            if (epcp->out_state->rxpkts > 0) {
-                epcp->out_state->rxpkts -= 1;
-            }
-
-            if (n < epcp->out_maxsize || epcp->out_state->rxpkts == 0)
-            {
-                _usb_isr_invoke_out_cb(usbp, ep);
-            }
-            else
-            {
-                //not done. keep on receiving
-                USB_EPnAck(ep, 0);
-            }
-        }
-        else
-        {
-            // Process transmit queue
-            isp->txcnt += isp->txlast;
-            n = isp->txsize - isp->txcnt;
-
-            if (n > 0)
-            {
-                /* Transfer not completed, there are more packets to send.*/
-                if (n > epcp->in_maxsize)
-                {
-                    n = epcp->in_maxsize;
-                }
-
-                /* Writes the packet from the defined buffer.*/
-                isp->txbuf += isp->txlast;
-                isp->txlast = n;
-
-                sn32_usb_write_fifo(ep, isp->txbuf, n, true);
-
-                USB_EPnAck(ep, n);
-            }
-            else
-            {
-                //USB_EPnNak(ep); //not needed here it is autoreset to NAK already
-
-                _usb_isr_invoke_in_cb(usbp, ep);
-            }
+            handle_ack(usbp, ep, out, cnt);
         }
     }
     else if (iwIntFlag & (mskEP4_NAK|mskEP3_NAK|mskEP2_NAK|mskEP1_NAK))
@@ -470,6 +487,7 @@ static void usb_lld_serve_interrupt(USBDriver *usbp)
             ep = USB_EP1;
             out = ( SN_USB->CFG & mskEP1_DIR ) == mskEP1_DIR;
             //cnt = SN_USB->EP1CTL & mskEPn_CNT;
+            handle_nak(usbp, ep, out);
         }
         if (iwIntFlag & mskEP2_NAK)
         {
@@ -477,6 +495,7 @@ static void usb_lld_serve_interrupt(USBDriver *usbp)
             ep = USB_EP2;
             out = ( SN_USB->CFG & mskEP2_DIR ) == mskEP2_DIR;
             //cnt = SN_USB->EP2CTL & mskEPn_CNT;
+            handle_nak(usbp, ep, out);
         }
         if (iwIntFlag & mskEP3_NAK)
         {
@@ -484,6 +503,7 @@ static void usb_lld_serve_interrupt(USBDriver *usbp)
             ep = USB_EP3;
             out = ( SN_USB->CFG & mskEP3_DIR ) == mskEP3_DIR;
             //cnt = SN_USB->EP3CTL & mskEPn_CNT;
+            handle_nak(usbp, ep, out);
         }
         if (iwIntFlag & mskEP4_NAK)
         {
@@ -491,22 +511,8 @@ static void usb_lld_serve_interrupt(USBDriver *usbp)
             ep = USB_EP4;
             out = ( SN_USB->CFG & mskEP4_DIR ) == mskEP4_DIR;
             //cnt = SN_USB->EP4CTL & mskEPn_CNT;
+            handle_nak(usbp, ep, out);
         }
-
-        //handle it properly
-        if(out)
-        {
-            //why? try receiving again?
-            USB_EPnAck(ep, 0);
-        }
-        else
-        {
-            //???NAK should not happen for IN endpoints???
-            //USB_EPnNak(ep); // useless?
-
-            _usb_isr_invoke_in_cb(usbp, ep);
-        }
-
     }
 
     /////////////////////////////////////////////////
@@ -565,7 +571,7 @@ void usb_lld_start(USBDriver *usbp) {
         #if PLATFORM_USB_USE_USB1 == TRUE
         if (&USBD1 == usbp) {
             USB_Init();
-            nvicEnableVector(USB_IRQn, 2);
+            nvicEnableVector(USB_IRQn, 14);
         }
         #endif
     }
