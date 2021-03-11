@@ -97,9 +97,9 @@ static void sn32_usb_read_fifo(usbep_t ep, uint8_t *buf, size_t sz, bool intr) {
     uint32_t data;
 
     //Limit size to max packet size allowed in USB ram
-    if (sz > wUSB_EPnMaxPacketSize[ep]) {
-        sz = wUSB_EPnMaxPacketSize[ep];
-    }
+    //if (sz > wUSB_EPnMaxPacketSize[ep]) {
+    //    sz = wUSB_EPnMaxPacketSize[ep];
+    //}
 
     off = 0;
     while (off != sz) {
@@ -137,9 +137,9 @@ static void sn32_usb_write_fifo(usbep_t ep, const uint8_t *buf, size_t sz, bool 
     uint32_t data;
 
     //Limit size to max packet size allowed in USB ram
-    if (sz > wUSB_EPnMaxPacketSize[ep]) {
-        sz = wUSB_EPnMaxPacketSize[ep];
-    }
+    //if (sz > wUSB_EPnMaxPacketSize[ep]) {
+    //    sz = wUSB_EPnMaxPacketSize[ep];
+    //}
 
     off = 0;
 

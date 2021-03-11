@@ -185,6 +185,7 @@
 #define USB_EP0_PACKET_SIZE                     64  // only 8, 64
 #define USB_EP1_PACKET_SIZE                     0x40
 #define USB_EP2_PACKET_SIZE                     0x40
+// need to handle it better for the RAW_HID setup when IN and OUT packets are 64bytes
 #define USB_EP3_PACKET_SIZE                     0x20
 #define USB_EP4_PACKET_SIZE                     0x20
 
